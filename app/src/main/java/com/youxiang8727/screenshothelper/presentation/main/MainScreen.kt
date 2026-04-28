@@ -3,7 +3,6 @@ package com.youxiang8727.screenshothelper.presentation.main
 import android.app.Activity
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
-import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -15,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.youxiang8727.screenshothelper.R
@@ -46,7 +46,8 @@ fun MainScreen(
                 putExtra(ScreenshotService.EXTRA_RESULT_CODE, result.resultCode)
                 putExtra(ScreenshotService.EXTRA_DATA, result.data)
             }
-            context.startForegroundService(serviceIntent)
+            // 使用 ContextCompat 兼容 Android 8.0 以下版本
+            ContextCompat.startForegroundService(context, serviceIntent)
             isMediaProjectionAuthorized = true
         } else {
             Toast.makeText(context, "截圖授權未完成", Toast.LENGTH_SHORT).show()
