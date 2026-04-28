@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">ScreenshotHelper</string>
+    <string name="accessibility_service_label">ScreenshotHelper 輔助功能</string>
+    <string name="accessibility_service_description">用於遍歷畫面節點並儲存為 XML 檔案</string>
+    <string name="btn_request_overlay_permission">申請懸浮視窗權限</string>
+    <string name="btn_request_accessibility_permission">開啟輔助功能服務</string>
+    <string name="btn_start_float_window">啟動懸浮視窗</string>
+    <string name="btn_screenshot">截圖</string>
+    <string name="btn_get_nodes">獲取節點</string>
+    <string name="overlay_permission_granted">懸浮視窗權限已授予</string>
+    <string name="overlay_permission_denied">尚未授予懸浮視窗權限</string>
+    <string name="accessibility_granted">輔助功能服務已啟用</string>
+    <string name="accessibility_denied">輔助功能服務未啟用</string>
+    <string name="screenshot_saved">截圖已儲存</string>
+    <string name="nodes_saved">節點已儲存</string>
+    <string name="notification_channel_name">ScreenshotHelper 服務</string>
+    <string name="notification_title">ScreenshotHelper 運行中</string>
+    <string name="notification_content">懸浮視窗服務運行中</string>
+</resources>
