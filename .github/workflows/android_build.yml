@@ -1,8 +1,13 @@
-name: Android Build APK
+name: Android Build & Release
 
 on:
   push:
     branches: [ "master" ]
+    tags:
+      - 'v*' # 当你推送以 v 开头的标签时也会触发（如 v1.0）
+
+permissions:
+  contents: write # 允许 Action 创建 Release
 
 jobs:
   build:
@@ -24,7 +29,23 @@ jobs:
     - name: Build Debug APK
       run: ./gradlew assembleDebug
 
-    - name: Upload APK
+    - name: Rename APK for identification
+      run: |
+        mv app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/ScreenshotHelper_v${{ github.run_number }}.apk
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      if: github.ref == 'refs/heads/master'
+      with:
+        tag_name: latest
+        name: Latest Build (Run ${{ github.run_number }})
+        draft: false
+        prerelease: false
+        files: app/build/outputs/apk/debug/*.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload Artifact (Backup)
       uses: actions/upload-artifact@v4
       with:
         name: screenshot-helper-debug
