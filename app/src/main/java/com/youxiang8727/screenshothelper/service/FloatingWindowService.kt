@@ -1,32 +1,81 @@
 package com.youxiang8727.screenshothelper.service
 
-import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.Service
-import android.content.Context
 import android.content.Intent
-import android.graphics.*
-import android.graphics.drawable.GradientDrawable
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import android.util.TypedValue
-import android.view.*
-import android.widget.*
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
+import android.widget.Toast
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
-import com.youxiang8727.screenshothelper.MainActivity
-import com.youxiang8727.screenshothelper.R
+import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.youxiang8727.screenshothelper.util.OcrHelper
 import com.youxiang8727.screenshothelper.util.OpenCvHelper
-import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.combine
-import kotlin.math.abs
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlin.math.max
 import kotlin.math.min
 
-class FloatingWindowService : Service() {
+class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStateRegistryOwner {
 
     companion object {
         private const val TAG = "FloatingWindowService"
@@ -38,35 +87,31 @@ class FloatingWindowService : Service() {
     }
 
     private var windowManager: WindowManager? = null
-    private var floatingView: DraggableContainer? = null
-    private var selectionOverlay: SelectionOverlayView? = null
-    private lateinit var layoutParams: WindowManager.LayoutParams
-    private var isMinimized = false
-
+    private var floatingComposeView: ComposeView? = null
+    private var selectionComposeView: ComposeView? = null
+    
+    private lateinit var floatingParams: WindowManager.LayoutParams
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    // Implement ViewModelStoreOwner
+    private val store = ViewModelStore()
+    override val viewModelStore: ViewModelStore = store
+
+    // Implement SavedStateRegistryOwner
+    private val savedStateRegistryController = SavedStateRegistryController.create(this)
+    override val savedStateRegistry: SavedStateRegistry = savedStateRegistryController.savedStateRegistry
 
     override fun onCreate() {
         super.onCreate()
+        savedStateRegistryController.performRestore(null)
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
         setupFloatingWindow()
-        observePermissionStates()
-    }
-
-    private fun observePermissionStates() {
-        serviceScope.launch {
-            combine(
-                ScreenshotService.isAuthorized,
-                NodeAccessibilityService.isConnected
-            ) { screenshot, accessibility ->
-                screenshot to accessibility
-            }.collect {
-                floatingView?.refreshUI()
-            }
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
         return START_NOT_STICKY
     }
 
@@ -75,9 +120,13 @@ class FloatingWindowService : Service() {
         serviceScope.cancel()
         removeFloatingWindow()
         removeSelectionOverlay()
+        store.clear()
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent): IBinder? {
+        super.onBind(intent)
+        return null
+    }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
@@ -85,8 +134,6 @@ class FloatingWindowService : Service() {
     }
 
     private fun setupFloatingWindow() {
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        
         val windowType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
@@ -94,7 +141,7 @@ class FloatingWindowService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        layoutParams = WindowManager.LayoutParams(
+        floatingParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             windowType,
@@ -105,13 +152,31 @@ class FloatingWindowService : Service() {
             x = savedX
             y = savedY
         }
-        floatingView = DraggableContainer(this).apply { refreshUI() }
-        windowManager?.addView(floatingView, layoutParams)
+
+        floatingComposeView = createComposeView {
+            FloatingBubbleContent(
+                onDrag = { dx, dy ->
+                    floatingParams.x += dx
+                    floatingParams.y += dy
+                    windowManager?.updateViewLayout(floatingComposeView, floatingParams)
+                    savedX = floatingParams.x
+                    savedY = floatingParams.y
+                },
+                onScreenshotClick = {
+                    ScreenshotService.takeScreenshot()
+                    NodeAccessibilityService.instance?.performNodeDump()
+                },
+                onOcrClick = { showSelectionOverlay() },
+                onSliderClick = { handleCalculateSlider() }
+            )
+        }
+
+        windowManager?.addView(floatingComposeView, floatingParams)
     }
 
     private fun showSelectionOverlay() {
-        if (selectionOverlay != null) return
-        
+        if (selectionComposeView != null) return
+
         val windowType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
@@ -126,30 +191,40 @@ class FloatingWindowService : Service() {
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         )
-        
-        selectionOverlay = SelectionOverlayView(this) { rect ->
-            handleSelectionResult(rect)
+
+        selectionComposeView = createComposeView {
+            SelectionOverlayContent(
+                onSelected = { rect ->
+                    handleSelectionResult(rect)
+                }
+            )
         }
-        windowManager?.addView(selectionOverlay, params)
-        floatingView?.visibility = View.GONE
+
+        windowManager?.addView(selectionComposeView, params)
+        floatingComposeView?.visibility = View.GONE
     }
 
     private fun removeSelectionOverlay() {
-        selectionOverlay?.let {
+        selectionComposeView?.let {
             try { windowManager?.removeView(it) } catch (e: Exception) {}
         }
-        selectionOverlay = null
-        floatingView?.visibility = View.VISIBLE
+        selectionComposeView = null
+        floatingComposeView?.visibility = View.VISIBLE
+    }
+
+    private fun removeFloatingWindow() {
+        floatingComposeView?.let {
+            try { windowManager?.removeView(it) } catch (e: Exception) {}
+        }
+        floatingComposeView = null
     }
 
     private fun handleSelectionResult(rect: Rect) {
         removeSelectionOverlay()
-        
         if (rect.width() < 10 || rect.height() < 10) return
 
         ScreenshotService.captureCurrentFrame { fullBitmap ->
             if (fullBitmap == null) return@captureCurrentFrame
-            
             try {
                 val cropLeft = rect.left.coerceIn(0, fullBitmap.width - 1)
                 val cropTop = rect.top.coerceIn(0, fullBitmap.height - 1)
@@ -157,11 +232,9 @@ class FloatingWindowService : Service() {
                 val cropHeight = rect.height().coerceAtMost(fullBitmap.height - cropTop)
 
                 val cropped = Bitmap.createBitmap(fullBitmap, cropLeft, cropTop, cropWidth, cropHeight)
-                
                 OcrHelper.recognizeText(cropped) { visionText ->
                     if (visionText != null) {
                         OcrHelper.saveResult(this, cropped, visionText, rect)
-                        Log.d(TAG, "OCR Result Saved: ${visionText.text}")
                         serviceScope.launch(Dispatchers.Main) {
                             Toast.makeText(this@FloatingWindowService, "辨識完成並已存檔", Toast.LENGTH_SHORT).show()
                         }
@@ -176,293 +249,39 @@ class FloatingWindowService : Service() {
         }
     }
 
-    private fun toggleMinimize() {
-        isMinimized = !isMinimized
-        floatingView?.refreshUI()
-        windowManager?.updateViewLayout(floatingView, layoutParams)
-    }
+    private fun handleCalculateSlider() {
+        val accessibilityService = NodeAccessibilityService.instance ?: return
+        val targetNode = accessibilityService.findNodeById("puzzle_backimg").getOrNull(0)
+        val puzzle = accessibilityService.findNodeById("puzzle_slot").getOrNull(0)
+        val slider = accessibilityService.findNodeByText("请拖动滑块完成拼图").getOrNull(0)?.parent?.getChild(2)
 
-    private fun removeFloatingWindow() {
-        floatingView?.let {
-            try { windowManager?.removeView(it) } catch (e: Exception) { }
-        }
-        floatingView = null
-    }
-
-    @SuppressLint("ViewConstructor")
-    inner class SelectionOverlayView(context: Context, val onSelected: (Rect) -> Unit) : View(context) {
-        private var startX = 0f
-        private var startY = 0f
-        private var currentX = 0f
-        private var currentY = 0f
-        private var isSelecting = false
-        
-        private val paint = Paint().apply {
-            color = Color.parseColor("#80000000")
-            style = Paint.Style.FILL
-        }
-        
-        private val strokePaint = Paint().apply {
-            color = Color.WHITE
-            style = Paint.Style.STROKE
-            strokeWidth = 5f
-            pathEffect = DashPathEffect(floatArrayOf(10f, 10f), 0f)
-        }
-        
-        private val clearPaint = Paint().apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
-            if (isSelecting) {
-                val location = IntArray(2)
-                getLocationOnScreen(location)
-                val localStartX = startX - location[0]
-                val localStartY = startY - location[1]
-                val localCurrentX = currentX - location[0]
-                val localCurrentY = currentY - location[1]
-
-                val left = min(localStartX, localCurrentX)
-                val top = min(localStartY, localCurrentY)
-                val right = max(localStartX, localCurrentX)
-                val bottom = max(localStartY, localCurrentY)
-                canvas.drawRect(left, top, right, bottom, clearPaint)
-                canvas.drawRect(left, top, right, bottom, strokePaint)
-            }
-        }
-
-        @SuppressLint("ClickableViewAccessibility")
-        override fun onTouchEvent(event: MotionEvent): Boolean {
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    startX = event.rawX
-                    startY = event.rawY
-                    currentX = event.rawX
-                    currentY = event.rawY
-                    isSelecting = true
-                    return true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    currentX = event.rawX
-                    currentY = event.rawY
-                    invalidate()
-                    return true
-                }
-                MotionEvent.ACTION_UP -> {
-                    isSelecting = false
-                    val rect = Rect(
-                        min(startX, event.rawX).toInt(),
-                        min(startY, event.rawY).toInt(),
-                        max(startX, event.rawX).toInt(),
-                        max(startY, event.rawY).toInt()
-                    )
-                    onSelected(rect)
-                    return true
-                }
-            }
-            return super.onTouchEvent(event)
-        }
-    }
-
-    inner class DraggableContainer(context: Context) : FrameLayout(context) {
-        private var initialX = 0
-        private var initialY = 0
-        private var initialTouchX = 0f
-        private var initialTouchY = 0f
-        private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
-        private var isDragging = false
-
-        fun refreshUI() {
-            removeAllViews()
-            if (isMinimized) setupMinimizedView() else setupExpandedView()
-        }
-
-        private fun setupExpandedView() {
-            val isScreenshotReady = ScreenshotService.isAuthorized.value
-            val isAccessibilityReady = NodeAccessibilityService.isConnected.value
-
-            val mainLayout = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dpToPx(12), dpToPx(8), dpToPx(12), dpToPx(12))
-                background = GradientDrawable().apply {
-                    setColor(0xCC333333.toInt()) 
-                    cornerRadius = dpToPx(16).toFloat()
-                    setStroke(dpToPx(1), 0x33FFFFFF.toInt()) 
-                }
-                elevation = dpToPx(8).toFloat()
-            }
-
-            val header = LinearLayout(context).apply {
-                gravity = Gravity.CENTER_VERTICAL
-                orientation = LinearLayout.HORIZONTAL
-            }
-
-            header.addView(TextView(context).apply {
-                text = "Helper"
-                textSize = 11f
-                setTextColor(0xAAFFFFFF.toInt()) 
-                typeface = Typeface.DEFAULT_BOLD
-                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-            })
-
-            header.addView(TextView(context).apply {
-                text = " — "
-                setPadding(dpToPx(8), dpToPx(4), dpToPx(8), dpToPx(4))
-                textSize = 18f
-                setTextColor(Color.WHITE)
-                setOnClickListener { toggleMinimize() }
-            })
-
-            mainLayout.addView(header)
-
-            val btnParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpToPx(10) }
-
-            if (!isScreenshotReady || !isAccessibilityReady) {
-                mainLayout.addView(TextView(context).apply {
-                    text = "⚠️ 請開啟授權與無障礙"
-                    textSize = 11f
-                    setTextColor(0xFFFF5252.toInt()) 
-                    setPadding(0, dpToPx(8), 0, dpToPx(8))
-                    gravity = Gravity.CENTER
-                })
-            } else {
-                mainLayout.addView(Button(context).apply {
-                    text = getString(R.string.btn_screenshot)
-                    layoutParams = btnParams
-                    transformationMethod = null
-                    background = createOutlinedDrawable(0xFFBB86FC.toInt())
-                    setTextColor(0xFFBB86FC.toInt())
-                    setOnClickListener { ScreenshotService.takeScreenshot() }
-                })
-
-                mainLayout.addView(Button(context).apply {
-                    text = getString(R.string.btn_get_nodes)
-                    layoutParams = btnParams
-                    transformationMethod = null
-                    background = createOutlinedDrawable(0xFF03DAC5.toInt())
-                    setTextColor(0xFF03DAC5.toInt())
-                    setOnClickListener { NodeAccessibilityService.instance?.performNodeDump() }
-                })
-
-                mainLayout.addView(Button(context).apply {
-                    text = "辨識文字"
-                    layoutParams = btnParams
-                    transformationMethod = null
-                    background = createOutlinedDrawable(0xFF4CAF50.toInt())
-                    setTextColor(0xFF4CAF50.toInt())
-                    setOnClickListener { showSelectionOverlay() }
-                })
-
-                mainLayout.addView(Button(context).apply {
-                    text = "計算滑動距離"
-                    layoutParams = btnParams
-                    transformationMethod = null
-                    background = createOutlinedDrawable(Color.YELLOW)
-                    setTextColor(Color.YELLOW)
-                    setOnClickListener { handleCalculateSlider() }
-                })
-            }
-            addView(mainLayout)
-        }
-
-        private fun handleCalculateSlider() {
-            val accessibilityService = NodeAccessibilityService.instance ?: return
-            val rootNode = accessibilityService.rootInActiveWindow ?: return
-
-            val targetNode = accessibilityService.findNodeById("puzzle_backimg").getOrNull(0)
-            val puzzle = accessibilityService.findNodeById("puzzle_slot").getOrNull(0)
-            val slider = accessibilityService.findNodeByText("请拖动滑块完成拼图").getOrNull(0)?.parent?.getChild(2)
-
-            if (targetNode != null && puzzle != null && slider != null) {
-                val sliderRect = Rect().apply { slider.getBoundsInScreen(this) }
-                OpenCvHelper.identifySliderOffset(this@FloatingWindowService, targetNode, puzzle) { offset ->
-                    serviceScope.launch(Dispatchers.Main) {
-                        if (offset > 0) {
-                            accessibilityService.dispatchSwipe(
-                                sliderRect.centerX(), sliderRect.centerY(),
-                                sliderRect.centerX() + offset, sliderRect.centerY(), 1000
-                            )
-                        }
+        if (targetNode != null && puzzle != null && slider != null) {
+            val sliderRect = Rect().apply { slider.getBoundsInScreen(this) }
+            OpenCvHelper.identifySliderOffset(this@FloatingWindowService, targetNode, puzzle) { offset ->
+                serviceScope.launch(Dispatchers.Main) {
+                    if (offset > 0) {
+                        accessibilityService.dispatchSwipe(
+                            sliderRect.centerX(), sliderRect.centerY(),
+                            sliderRect.centerX() + offset, sliderRect.centerY(), 1000
+                        )
                     }
                 }
             }
-            rootNode.recycle()
         }
+    }
 
-        private fun setupMinimizedView() {
-            val miniCircle = FrameLayout(context).apply {
-                layoutParams = LayoutParams(dpToPx(52), dpToPx(52))
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(0xCC333333.toInt()) 
-                    setStroke(dpToPx(2), Color.WHITE)
-                }
-                elevation = dpToPx(8).toFloat()
-                addView(TextView(context).apply {
-                    text = "📸"
-                    gravity = Gravity.CENTER
-                    layoutParams = LayoutParams(-1, -1)
-                })
-                setOnClickListener { toggleMinimize() }
-            }
-            addView(miniCircle)
-        }
-
-        private fun createOutlinedDrawable(color: Int) = GradientDrawable().apply {
-            setColor(Color.TRANSPARENT)
-            cornerRadius = dpToPx(10).toFloat()
-            setStroke(dpToPx(2), color)
-        }
-
-        private fun dpToPx(dp: Int): Int = TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP, dp.toFloat(), resources.displayMetrics
-        ).toInt()
-
-        override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
-            when (ev.action) {
-                MotionEvent.ACTION_DOWN -> updateInitialTouch(ev)
-                MotionEvent.ACTION_MOVE -> if (checkTouchSlop(ev)) { isDragging = true; return true }
-            }
-            return super.onInterceptTouchEvent(ev)
-        }
-
-        override fun onTouchEvent(event: MotionEvent): Boolean {
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> { updateInitialTouch(event); return true }
-                MotionEvent.ACTION_MOVE -> {
-                    if (!isDragging && checkTouchSlop(event)) isDragging = true
-                    if (isDragging) {
-                        this@FloatingWindowService.layoutParams.x = initialX + (event.rawX - initialTouchX).toInt()
-                        this@FloatingWindowService.layoutParams.y = initialY + (event.rawY - initialTouchY).toInt()
-                        windowManager?.updateViewLayout(this, this@FloatingWindowService.layoutParams)
-                    }
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (isDragging) { 
-                        savedX = this@FloatingWindowService.layoutParams.x
-                        savedY = this@FloatingWindowService.layoutParams.y 
-                    } else if (event.action == MotionEvent.ACTION_UP) performClick()
-                    isDragging = false
+    private fun createComposeView(content: @Composable () -> Unit): ComposeView {
+        return ComposeView(this).apply {
+            setViewTreeLifecycleOwner(this@FloatingWindowService)
+            setViewTreeViewModelStoreOwner(this@FloatingWindowService)
+            setViewTreeSavedStateRegistryOwner(this@FloatingWindowService)
+            
+            setContent {
+                MaterialTheme(colorScheme = darkColorScheme()) {
+                    content()
                 }
             }
-            return true
         }
-
-        private fun updateInitialTouch(ev: MotionEvent) {
-            initialX = this@FloatingWindowService.layoutParams.x
-            initialY = this@FloatingWindowService.layoutParams.y
-            initialTouchX = ev.rawX
-            initialTouchY = ev.rawY
-            isDragging = false
-        }
-
-        private fun checkTouchSlop(ev: MotionEvent): Boolean {
-            val dx = abs(ev.rawX - initialTouchX); val dy = abs(ev.rawY - initialTouchY)
-            return dx > touchSlop || dy > touchSlop
-        }
-
-        override fun performClick(): Boolean = super.performClick()
     }
 
     private fun createNotificationChannel() {
@@ -478,4 +297,163 @@ class FloatingWindowService : Service() {
             .setContentText("服務運行中")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .build()
+}
+
+@Composable
+fun FloatingBubbleContent(
+    onDrag: (Int, Int) -> Unit,
+    onScreenshotClick: () -> Unit,
+    onOcrClick: () -> Unit,
+    onSliderClick: () -> Unit
+) {
+    var isMinimized by remember { mutableStateOf(false) }
+    val isScreenshotAuthorized by ScreenshotService.isAuthorized.collectAsState()
+    val isAccessibilityEnabled by NodeAccessibilityService.isConnected.collectAsState()
+
+    Box(
+        modifier = Modifier
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    onDrag(dragAmount.x.toInt(), dragAmount.y.toInt())
+                }
+            }
+    ) {
+        if (isMinimized) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xCC333333))
+                    .border(2.dp, Color.White, CircleShape)
+                    .clickable { isMinimized = false },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("📸", fontSize = 24.sp)
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .width(160.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xCC333333))
+                    .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(16.dp))
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "Helper",
+                        color = Color(0xAAFFFFFF),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        " — ",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        modifier = Modifier
+                            .clickable { isMinimized = true }
+                            .padding(horizontal = 4.dp)
+                    )
+                }
+
+                if (!isScreenshotAuthorized || !isAccessibilityEnabled) {
+                    Text(
+                        "⚠️ 請開啟授權與無障礙",
+                        color = Color(0xFFFF5252),
+                        fontSize = 11.sp,
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    )
+                } else {
+                    ActionButton("截圖 & 節點", Color(0xFFBB86FC), onScreenshotClick)
+                    ActionButton("辨識文字", Color(0xFF4CAF50), onOcrClick)
+                    ActionButton("計算滑動距離", Color.Yellow, onSliderClick)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ActionButton(text: String, color: Color, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        border = androidx.compose.foundation.BorderStroke(2.dp, color),
+        contentPadding = PaddingValues(vertical = 4.dp)
+    ) {
+        Text(text, color = color, fontSize = 12.sp)
+    }
+}
+
+@Composable
+fun SelectionOverlayContent(onSelected: (Rect) -> Unit) {
+    var startPos by remember { mutableStateOf<Offset?>(null) }
+    var currentPos by remember { mutableStateOf<Offset?>(null) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.5f))
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        startPos = offset
+                        currentPos = offset
+                    },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        currentPos = change.position
+                    },
+                    onDragEnd = {
+                        val s = startPos
+                        val c = currentPos
+                        if (s != null && c != null) {
+                            val rect = Rect(
+                                min(s.x, c.x).toInt(),
+                                min(s.y, c.y).toInt(),
+                                max(s.x, c.x).toInt(),
+                                max(s.y, c.y).toInt()
+                            )
+                            onSelected(rect)
+                        }
+                        startPos = null
+                        currentPos = null
+                    }
+                )
+            }
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val s = startPos
+            val c = currentPos
+            if (s != null && c != null) {
+                val left = min(s.x, c.x)
+                val top = min(s.y, c.y)
+                val right = max(s.x, c.x)
+                val bottom = max(s.y, c.y)
+
+                drawRect(
+                    color = Color.Transparent,
+                    topLeft = Offset(left, top),
+                    size = Size(right - left, bottom - top),
+                    blendMode = BlendMode.Clear
+                )
+                drawRect(
+                    color = Color.White,
+                    topLeft = Offset(left, top),
+                    size = Size(right - left, bottom - top),
+                    style = Stroke(
+                        width = 2.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
+                    )
+                )
+            }
+        }
+    }
 }
