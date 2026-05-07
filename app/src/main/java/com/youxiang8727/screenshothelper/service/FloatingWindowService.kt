@@ -259,11 +259,12 @@ class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStat
             val sliderRect = Rect().apply { slider.getBoundsInScreen(this) }
             OpenCvHelper.identifySliderOffset(this@FloatingWindowService, targetNode, puzzle) { offset ->
                 serviceScope.launch(Dispatchers.Main) {
+                    Toast.makeText(this@FloatingWindowService, "偏移量: $offset", Toast.LENGTH_SHORT).show()
                     if (offset > 0) {
-                        accessibilityService.dispatchSwipe(
-                            sliderRect.centerX(), sliderRect.centerY(),
-                            sliderRect.centerX() + offset, sliderRect.centerY(), 1000
-                        )
+//                        accessibilityService.dispatchSwipe(
+//                            sliderRect.centerX(), sliderRect.centerY(),
+//                            sliderRect.centerX() + offset, sliderRect.centerY(), 1000
+//                        )
                     }
                 }
             }
@@ -372,7 +373,7 @@ fun FloatingBubbleContent(
                 } else {
                     ActionButton("截圖 & 節點", Color(0xFFBB86FC), onScreenshotClick)
                     ActionButton("辨識文字", Color(0xFF4CAF50), onOcrClick)
-                    ActionButton("計算滑動距離", Color.Yellow, onSliderClick)
+                    ActionButton("滑動驗證碼辨識", Color.Yellow, onSliderClick)
                 }
             }
         }
