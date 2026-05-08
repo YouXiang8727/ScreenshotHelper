@@ -11,6 +11,8 @@ import org.opencv.imgproc.Imgproc
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 object OpenCvHelper {
     private const val TAG = "OpenCvHelper"
@@ -90,21 +92,19 @@ object OpenCvHelper {
             // 1. 儲存原始剪裁圖
             saveDebugImage(context, mat, subDir, "1_original_$fileName")
 
-            // 灰階
+            // 2. 灰階
             val gray = Mat()
             Imgproc.cvtColor(mat, gray, Imgproc.COLOR_RGBA2GRAY)
-            // 2. 儲存灰階圖
             saveDebugImage(context, gray, subDir, "2_gray_$fileName")
 
-            // 高斯模糊降噪
-            Imgproc.GaussianBlur(gray, gray, Size(5.0, 5.0), 0.0)
-            // 3. 儲存模糊後的圖
-            saveDebugImage(context, gray, subDir, "3_blurred_$fileName")
+            // 3. 高斯模糊降噪
+            val blurred = Mat()
+            Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
+            saveDebugImage(context, blurred, subDir, "3_blurred_$fileName")
 
-            // 邊緣檢測
+            // 4. 邊緣檢測
             val edges = Mat()
-            Imgproc.Canny(gray, edges, 50.0, 150.0)
-            // 4. 儲存邊緣檢測圖
+            Imgproc.Canny(blurred, edges, 50.0, 150.0)
             saveDebugImage(context, edges, subDir, "4_edges_$fileName")
 
             // 水平投影：每列邊緣像素總和
@@ -116,35 +116,70 @@ object OpenCvHelper {
                 sum
             }
 
-            // 找灰階差異最大的列，通常是缺口中心
-            var maxDiff = 0
-            var gapX = 0
+            // --- 演算法邏輯：尋找兩個顯著邊緣 (參考排除原位邏輯) ---
+            var maxDiff1 = -1
+            var pos1 = -1
+            var maxDiff2 = -1
+            var pos2 = -1
+
+            // 第一遍：找最強邊緣 (通常是拼圖)
             for (x in 1 until colSums.size) {
                 val diff = colSums[x] - colSums[x - 1]
-                if (diff > maxDiff) {
-                    maxDiff = diff
-                    gapX = x
+                if (diff > maxDiff1) {
+                    maxDiff1 = diff
+                    pos1 = x
+                }
+            }
+
+            // 第二遍：找次強邊緣 (缺口)，但排除掉第一個點及其周邊區域 (增加排除範圍至 50)
+            val excludeRange = 50
+            for (x in 1 until colSums.size) {
+                if (pos1 != -1 && abs(x - pos1) < excludeRange) continue
+                
+                val diff = colSums[x] - colSums[x - 1]
+                if (diff > maxDiff2) {
+                    maxDiff2 = diff
+                    pos2 = x
                 }
             }
 
             // 5. 繪製紅色結果框線並儲存
-            // 假設拼圖缺口寬度約 50 像素
             val rectWidth = 50
-            Imgproc.rectangle(
-                mat,
-                Rect(gapX, 0, rectWidth.coerceAtMost(mat.cols() - gapX), mat.rows()),
-                Scalar(255.0, 0.0, 0.0, 255.0),
-                2
-            )
+            
+            // 框出位置 1 (最強邊緣)
+            if (pos1 != -1 && maxDiff1 > 0) {
+                Imgproc.rectangle(
+                    mat,
+                    Rect(pos1, 0, rectWidth.coerceAtMost(mat.cols() - pos1), mat.rows()),
+                    Scalar(255.0, 0.0, 0.0, 255.0),
+                    2
+                )
+            }
+
+            // 框出位置 2 (次強邊緣)
+            if (pos2 != -1 && maxDiff2 > 0) {
+                Imgproc.rectangle(
+                    mat,
+                    Rect(pos2, 0, rectWidth.coerceAtMost(mat.cols() - pos2), mat.rows()),
+                    Scalar(255.0, 0.0, 0.0, 255.0),
+                    2
+                )
+            }
+            
             saveDebugImage(context, mat, subDir, "5_result_$fileName")
 
             // 釋放資源
             mat.release()
             gray.release()
+            blurred.release()
             edges.release()
             bitmap.recycle()
             
-            callback(gapX)
+            // 計算滑動距離：兩個顯著邊界點的間距 (abs(pos2 - pos1))
+            val distance = if (pos1 != -1 && pos2 != -1) abs(pos2 - pos1) else -1
+            Log.d(TAG, "autoFindSlideGap -> pos1: $pos1, pos2: $pos2, distance: $distance")
+            
+            callback(distance)
         }
     }
 

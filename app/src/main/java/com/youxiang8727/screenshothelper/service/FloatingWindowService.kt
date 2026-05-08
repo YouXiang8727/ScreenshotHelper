@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -60,6 +61,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
@@ -170,19 +172,30 @@ class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStat
 
         floatingComposeView = createComposeView {
             var showSliderConfig by remember { mutableStateOf(false) }
+            var showSliderPositionConfig by remember { mutableStateOf(false) }
             var isRecognizing by remember { mutableStateOf(false) }
 
-            // 從 SharedPreferences 加載初始值
-            var bigKey by remember { mutableStateOf(prefs.getString("bigKey", "puzzle_backimg") ?: "puzzle_backimg") }
-            var bigType by remember { mutableStateOf(SliderSearchType.valueOf(prefs.getString("bigType", SliderSearchType.ID.name) ?: SliderSearchType.ID.name)) }
-            var smallKey by remember { mutableStateOf(prefs.getString("smallKey", "puzzle_slot") ?: "puzzle_slot") }
-            var smallType by remember { mutableStateOf(SliderSearchType.valueOf(prefs.getString("smallType", SliderSearchType.ID.name) ?: SliderSearchType.ID.name)) }
+            // 節點配置狀態
+            var bigKey by remember { mutableStateOf(prefs.getString("bigKey", "验证码背景") ?: "验证码背景") }
+            var bigType by remember { mutableStateOf(SliderSearchType.valueOf(prefs.getString("bigType", SliderSearchType.CONTENT_DESCRIPTION.name) ?: SliderSearchType.CONTENT_DESCRIPTION.name)) }
+            var smallKey by remember { mutableStateOf(prefs.getString("smallKey", "验证码滑块") ?: "验证码滑块") }
+            var smallType by remember { mutableStateOf(SliderSearchType.valueOf(prefs.getString("smallType", SliderSearchType.CONTENT_DESCRIPTION.name) ?: SliderSearchType.CONTENT_DESCRIPTION.name)) }
 
-            // 確保每次變更都寫入 Prefs
+            // 位置配置狀態 (LTRB)
+            var leftStr by remember { mutableStateOf(prefs.getString("leftStr", "530") ?: "530") }
+            var topStr by remember { mutableStateOf(prefs.getString("topStr", "953") ?: "953") }
+            var rightStr by remember { mutableStateOf(prefs.getString("rightStr", "820") ?: "820") }
+            var bottomStr by remember { mutableStateOf(prefs.getString("bottomStr", "1098") ?: "1098") }
+
+            // 儲存 Helper
             val updateBigKey: (String) -> Unit = { it -> bigKey = it; prefs.edit().putString("bigKey", it).apply() }
             val updateBigType: (SliderSearchType) -> Unit = { it -> bigType = it; prefs.edit().putString("bigType", it.name).apply() }
             val updateSmallKey: (String) -> Unit = { it -> smallKey = it; prefs.edit().putString("smallKey", it).apply() }
             val updateSmallType: (SliderSearchType) -> Unit = { it -> smallType = it; prefs.edit().putString("smallType", it.name).apply() }
+
+            val updatePos: (String, String) -> Unit = { key, value ->
+                prefs.edit().putString(key, value).apply()
+            }
 
             val onDrag: (Int, Int) -> Unit = { dx, dy ->
                 floatingParams.x += dx
@@ -194,20 +207,7 @@ class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStat
 
             if (isRecognizing) {
                 RecognizingContent(onDrag = onDrag)
-            } else if (!showSliderConfig) {
-                FloatingBubbleContent(
-                    onDrag = onDrag,
-                    onScreenshotClick = {
-                        ScreenshotService.takeScreenshot()
-                        NodeAccessibilityService.instance?.performNodeDump()
-                    },
-                    onOcrClick = { showSelectionOverlay() },
-                    onSliderClick = { 
-                        showSliderConfig = true
-                        updateFloatingWindowFocus(true)
-                    }
-                )
-            } else {
+            } else if (showSliderConfig) {
                 SliderConfigContent(
                     bigKey = bigKey,
                     onBigKeyChange = updateBigKey,
@@ -227,6 +227,60 @@ class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStat
                             isRecognizing = recognizing
                             updateFloatingWindowFocus(!recognizing)
                         }
+                    }
+                )
+            } else if (showSliderPositionConfig) {
+                SliderPositionConfigContent(
+                    left = leftStr,
+                    onLeftChange = { leftStr = it; updatePos("leftStr", it) },
+                    top = topStr,
+                    onTopChange = { topStr = it; updatePos("topStr", it) },
+                    right = rightStr,
+                    onRightChange = { rightStr = it; updatePos("rightStr", it) },
+                    bottom = bottomStr,
+                    onBottomChange = { bottomStr = it; updatePos("bottomStr", it) },
+                    onDrag = onDrag,
+                    onBack = { 
+                        showSliderPositionConfig = false
+                        updateFloatingWindowFocus(false)
+                    },
+                    onRecognize = {
+                        isRecognizing = true
+                        updateFloatingWindowFocus(false)
+                        serviceScope.launch(Dispatchers.Main) {
+                            // 給 UI 變換時間並收合鍵盤
+                            delay(400)
+                            OpenCvHelper.autoFindSlideGap(
+                                this@FloatingWindowService,
+                                leftStr.toIntOrNull() ?: 0,
+                                topStr.toIntOrNull() ?: 0,
+                                rightStr.toIntOrNull() ?: 0,
+                                bottomStr.toIntOrNull() ?: 0
+                            ) { resultX ->
+                                serviceScope.launch(Dispatchers.Main) {
+                                    isRecognizing = false
+                                    updateFloatingWindowFocus(true)
+                                    Toast.makeText(this@FloatingWindowService, "偵測結果 X: $resultX", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    }
+                )
+            } else {
+                FloatingBubbleContent(
+                    onDrag = onDrag,
+                    onScreenshotClick = {
+                        ScreenshotService.takeScreenshot()
+                        NodeAccessibilityService.instance?.performNodeDump()
+                    },
+                    onOcrClick = { showSelectionOverlay() },
+                    onSliderClick = { 
+                        showSliderConfig = true
+                        updateFloatingWindowFocus(true)
+                    },
+                    onSliderPositionClick = {
+                        showSliderPositionConfig = true
+                        updateFloatingWindowFocus(true)
                     }
                 )
             }
@@ -453,7 +507,7 @@ fun SliderConfigContent(
                     .padding(4.dp)
             )
             Text(
-                "滑動驗證配置",
+                "滑動驗證配置(節點)",
                 color = Color.White,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
@@ -495,6 +549,109 @@ fun SliderConfigContent(
 }
 
 @Composable
+fun SliderPositionConfigContent(
+    left: String,
+    onLeftChange: (String) -> Unit,
+    top: String,
+    onTopChange: (String) -> Unit,
+    right: String,
+    onRightChange: (String) -> Unit,
+    bottom: String,
+    onBottomChange: (String) -> Unit,
+    onDrag: (Int, Int) -> Unit,
+    onBack: () -> Unit,
+    onRecognize: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .width(220.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xCC333333))
+            .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(16.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .pointerInput(Unit) {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        onDrag(dragAmount.x.toInt(), dragAmount.y.toInt())
+                    }
+                }
+        ) {
+            Text(
+                "⬅",
+                color = Color.White,
+                fontSize = 20.sp,
+                modifier = Modifier
+                    .clickable { onBack() }
+                    .padding(4.dp)
+            )
+            Text(
+                "滑動驗證配置(位置)",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("範圍配置 (LTRB):", color = Color.Cyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                OutlinedTextField(
+                    value = left,
+                    onValueChange = onLeftChange,
+                    label = { Text("Left", fontSize = 10.sp, color = Color.LightGray) },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp)
+                )
+                OutlinedTextField(
+                    value = top,
+                    onValueChange = onTopChange,
+                    label = { Text("Top", fontSize = 10.sp, color = Color.LightGray) },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp)
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                OutlinedTextField(
+                    value = right,
+                    onValueChange = onRightChange,
+                    label = { Text("Right", fontSize = 10.sp, color = Color.LightGray) },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp)
+                )
+                OutlinedTextField(
+                    value = bottom,
+                    onValueChange = onBottomChange,
+                    label = { Text("Bottom", fontSize = 10.sp, color = Color.LightGray) },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp)
+                )
+            }
+
+            ActionButton("辨識", Color.Yellow) {
+                onRecognize()
+            }
+        }
+    }
+}
+
+@Composable
 fun SearchTypeSelector(selectedType: SliderSearchType, onTypeSelected: (SliderSearchType) -> Unit) {
     Column {
         SliderSearchType.values().forEach { type ->
@@ -525,7 +682,8 @@ fun FloatingBubbleContent(
     onDrag: (Int, Int) -> Unit,
     onScreenshotClick: () -> Unit,
     onOcrClick: () -> Unit,
-    onSliderClick: () -> Unit
+    onSliderClick: () -> Unit,
+    onSliderPositionClick: () -> Unit
 ) {
     var isMinimized by remember { mutableStateOf(false) }
     val isScreenshotAuthorized by ScreenshotService.isAuthorized.collectAsState()
@@ -594,6 +752,7 @@ fun FloatingBubbleContent(
                     ActionButton("截圖 & 節點", Color(0xFFBB86FC), onScreenshotClick)
                     ActionButton("辨識文字", Color(0xFF4CAF50), onOcrClick)
                     ActionButton("滑動驗證碼辨識", Color.Yellow, onSliderClick)
+                    ActionButton("滑動驗證碼辨識(位置)", Color.Yellow, onSliderPositionClick)
                 }
             }
         }
