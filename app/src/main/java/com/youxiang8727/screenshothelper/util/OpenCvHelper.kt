@@ -60,6 +60,9 @@ object OpenCvHelper {
         }
     }
 
+    /**
+     * 自動尋找滑動缺口 (混合方案：邊緣檢測找拼圖 -> 模板匹配找缺口)
+     */
     fun autoFindSlideGap(
         context: Context,
         left: Int, 
@@ -107,7 +110,7 @@ object OpenCvHelper {
             Imgproc.Canny(blurred, edges, 50.0, 150.0)
             saveDebugImage(context, edges, subDir, "4_edges_$fileName")
 
-            // 水平投影：每列邊緣像素總和
+            // 水平投影：尋找最強邊緣作為拼圖起始點
             val colSums = IntArray(edges.cols()) { x ->
                 var sum = 0
                 for (y in 0 until edges.rows()) {
@@ -116,69 +119,59 @@ object OpenCvHelper {
                 sum
             }
 
-            // --- 演算法邏輯：尋找兩個顯著邊緣 (參考排除原位邏輯) ---
-            var maxDiff1 = -1
+            var maxDiff = -1
             var pos1 = -1
-            var maxDiff2 = -1
-            var pos2 = -1
-
-            // 第一遍：找最強邊緣 (通常是拼圖)
             for (x in 1 until colSums.size) {
                 val diff = colSums[x] - colSums[x - 1]
-                if (diff > maxDiff1) {
-                    maxDiff1 = diff
+                if (diff > maxDiff) {
+                    maxDiff = diff
                     pos1 = x
                 }
             }
 
-            // 第二遍：找次強邊緣 (缺口)，但排除掉第一個點及其周邊區域 (增加排除範圍至 50)
-            val excludeRange = 50
-            for (x in 1 until colSums.size) {
-                if (pos1 != -1 && abs(x - pos1) < excludeRange) continue
-                
-                val diff = colSums[x] - colSums[x - 1]
-                if (diff > maxDiff2) {
-                    maxDiff2 = diff
-                    pos2 = x
-                }
+            if (pos1 == -1) {
+                mat.release(); gray.release(); blurred.release(); edges.release(); bitmap.recycle()
+                callback(-1)
+                return@captureCurrentFrame
             }
 
-            // 5. 繪製紅色結果框線並儲存
-            val rectWidth = 50
-            
-            // 框出位置 1 (最強邊緣)
-            if (pos1 != -1 && maxDiff1 > 0) {
-                Imgproc.rectangle(
-                    mat,
-                    Rect(pos1, 0, rectWidth.coerceAtMost(mat.cols() - pos1), mat.rows()),
-                    Scalar(255.0, 0.0, 0.0, 255.0),
-                    2
-                )
+            // --- 核心改進：裁切拼圖塊作為模板進行全局匹配 ---
+            // 裁切寬度設定為 60 像素
+            val sliderWidth = 60
+            val sliderRect = android.graphics.Rect(
+                pos1, 
+                0, 
+                (pos1 + sliderWidth).coerceAtMost(bitmap.width), 
+                bitmap.height
+            )
+            val sliderBitmap = cropBitmap(bitmap, sliderRect)
+
+            if (sliderBitmap == null) {
+                mat.release(); gray.release(); blurred.release(); edges.release(); bitmap.recycle()
+                callback(-1)
+                return@captureCurrentFrame
             }
 
-            // 框出位置 2 (次強邊緣)
-            if (pos2 != -1 && maxDiff2 > 0) {
-                Imgproc.rectangle(
-                    mat,
-                    Rect(pos2, 0, rectWidth.coerceAtMost(mat.cols() - pos2), mat.rows()),
-                    Scalar(255.0, 0.0, 0.0, 255.0),
-                    2
-                )
-            }
-            
-            saveDebugImage(context, mat, subDir, "5_result_$fileName")
+            // 調用模板匹配演算法：它會畫上紅色標註並儲存第 5 步的結果圖
+            val distance = calculateAndDebug(
+                context, 
+                bitmap, 
+                sliderBitmap, 
+                pos1, 
+                0, 
+                subDir = subDir, 
+                fileName = "5_result_$fileName"
+            )
 
             // 釋放資源
             mat.release()
             gray.release()
             blurred.release()
             edges.release()
+            sliderBitmap.recycle()
             bitmap.recycle()
             
-            // 計算滑動距離：兩個顯著邊界點的間距 (abs(pos2 - pos1))
-            val distance = if (pos1 != -1 && pos2 != -1) abs(pos2 - pos1) else -1
-            Log.d(TAG, "autoFindSlideGap -> pos1: $pos1, pos2: $pos2, distance: $distance")
-            
+            Log.d(TAG, "autoFindSlideGap -> pos1(piece): $pos1, distance: $distance")
             callback(distance)
         }
     }
@@ -219,7 +212,7 @@ object OpenCvHelper {
         Utils.bitmapToMat(bgBmp, bgSrc)
         Utils.bitmapToMat(sliderBmp, sliderSrc)
 
-        // 1. 預處理
+        // 1. 預處理 (使用邊緣特徵進行匹配最準確)
         val bgGray = Mat()
         val sliderGray = Mat()
         Imgproc.cvtColor(bgSrc, bgGray, Imgproc.COLOR_RGBA2GRAY)
@@ -238,9 +231,10 @@ object OpenCvHelper {
         var bestMatchX = mmr.maxLoc.x.toInt()
         var bestMatchY = mmr.maxLoc.y.toInt()
         
-        // 排除原位
-        if (abs(bestMatchX - sliderX) < 10) {
+        // 排除原位 (避免匹配到拼圖塊本身)
+        if (abs(bestMatchX - sliderX) < 15) {
             val mask = Mat.ones(result.size(), CvType.CV_8U)
+            // 排除掉原位置及其右側的一小段範圍
             val excludeWidth = (sliderX + sliderSrc.width() / 2).coerceAtMost(result.cols())
             Imgproc.rectangle(mask, Rect(0, 0, excludeWidth, result.rows()), Scalar(0.0), -1)
             mmr = Core.minMaxLoc(result, mask)
@@ -249,27 +243,30 @@ object OpenCvHelper {
             mask.release()
         }
 
-        // 3. 繪製調試框線
+        // 3. 繪製紅色調試框線
+        val redColor = Scalar(255.0, 0.0, 0.0, 255.0)
+        // 標註原位
         Imgproc.rectangle(
             bgSrc, 
             Rect(sliderX, sliderY, sliderSrc.cols(), sliderSrc.rows()), 
-            Scalar(0.0, 0.0, 255.0, 255.0), 
+            redColor, 
             2
         )
+        // 標註匹配到的位置
         Imgproc.rectangle(
             bgSrc, 
             Rect(bestMatchX, bestMatchY, sliderSrc.cols(), sliderSrc.rows()), 
-            Scalar(0.0, 0.0, 0.0, 255.0), 
+            redColor, 
             2
         )
 
-        // 4. 儲存圖片
+        // 4. 儲存結果圖
         saveDebugImage(context, bgSrc, subDir, fileName)
 
         val finalDistance = bestMatchX - sliderX
-        Log.d(TAG, "Result -> MatchX: $bestMatchX, SliderX: $sliderX, Dist: $finalDistance, Conf: ${mmr.maxVal}")
+        Log.d(TAG, "calculateAndDebug -> MatchX: $bestMatchX, SliderX: $sliderX, Dist: $finalDistance, Conf: ${mmr.maxVal}")
 
-        // 釋放
+        // 釋放資源
         bgSrc.release(); sliderSrc.release(); bgGray.release(); sliderGray.release()
         bgEdges.release(); sliderEdges.release(); result.release()
 
