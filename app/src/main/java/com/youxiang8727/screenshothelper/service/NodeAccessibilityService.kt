@@ -83,31 +83,29 @@ class NodeAccessibilityService : AccessibilityService() {
     // ── 核心：遍歷節點並儲存為 XML ───────────────────────────────────────────
 
     fun performNodeDump() {
-        val rootNode = rootInActiveWindow ?: run {
-            Log.w(TAG, "rootInActiveWindow is null")
+        val roots = getTargetRoots()
+        if (roots.isEmpty()) {
+            Log.w(TAG, "No valid target roots found")
             return
         }
         try {
-            val document = buildXmlDocument(rootNode)
+            val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument()
+            val hierarchy = document.createElement("hierarchy").also {
+                it.setAttribute("rotation", "0")
+                document.appendChild(it)
+            }
+            
+            roots.forEach { root ->
+                traverseNodeToXml(document, hierarchy, root, 0)
+                root.recycle()
+            }
             saveXmlToFile(document)
         } catch (e: Exception) {
             Log.e(TAG, "Node dump failed", e)
-        } finally {
-            rootNode.recycle()
         }
     }
 
-    private fun buildXmlDocument(root: AccessibilityNodeInfo): Document {
-        val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument()
-        val hierarchy = document.createElement("hierarchy").also {
-            it.setAttribute("rotation", "0")
-            document.appendChild(it)
-        }
-        traverseNode(document, hierarchy, root, 0)
-        return document
-    }
-
-    private fun traverseNode(document: Document, parent: Element, node: AccessibilityNodeInfo, depth: Int) {
+    private fun traverseNodeToXml(document: Document, parent: Element, node: AccessibilityNodeInfo, depth: Int) {
         val element = document.createElement("node").apply {
             setAttribute("index", depth.toString())
             setAttribute("text", node.text?.toString() ?: "")
@@ -132,7 +130,7 @@ class NodeAccessibilityService : AccessibilityService() {
         parent.appendChild(element)
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            traverseNode(document, element, child, depth + 1)
+            traverseNodeToXml(document, element, child, depth + 1)
             child.recycle()
         }
     }
@@ -153,34 +151,74 @@ class NodeAccessibilityService : AccessibilityService() {
         Log.d(TAG, "Nodes saved → ${outputFile.absolutePath}")
     }
 
-    fun findNodeByText(text: String): List<AccessibilityNodeInfo> {
-        Log.d(TAG, "findNodeByText: $text")
-        val rootNode = rootInActiveWindow ?: return emptyList()
-        val result = mutableListOf<AccessibilityNodeInfo>()
-        traverseNode(rootNode, result)
-        return result.filter {
-            it.text?.toString() == text
+    /** 獲取所有非本 App 的目標視窗根節點 */
+    private fun getTargetRoots(): List<AccessibilityNodeInfo> {
+        val roots = mutableListOf<AccessibilityNodeInfo>()
+        val currentWindows = windows
+        
+        if (currentWindows.isNullOrEmpty()) {
+            // 如果視窗列表為空，則嘗試 rootInActiveWindow
+            rootInActiveWindow?.let {
+                if (it.packageName?.toString() != packageName) {
+                    roots.add(it)
+                } else {
+                    it.recycle()
+                }
+            }
+        } else {
+            // 遍歷所有視窗，排除本 App
+            for (window in currentWindows) {
+                val root = window.root ?: continue
+                if (root.packageName?.toString() != packageName) {
+                    roots.add(root)
+                } else {
+                    root.recycle()
+                }
+            }
         }
+        return roots
+    }
+
+    fun findNodeByText(text: String): List<AccessibilityNodeInfo> {
+        val result = mutableListOf<AccessibilityNodeInfo>()
+        getTargetRoots().forEach { root ->
+            traverseAndFilter(root, { it.text?.toString() == text }, result)
+            root.recycle()
+        }
+        return result
     }
 
     fun findNodeById(id: String): List<AccessibilityNodeInfo> {
-        Log.d(TAG, "findNodeById: $id")
-        val rootNode = rootInActiveWindow ?: return emptyList()
         val result = mutableListOf<AccessibilityNodeInfo>()
-        traverseNode(rootNode, result)
-        return result.filter {
-            it.viewIdResourceName == id
+        getTargetRoots().forEach { root ->
+            traverseAndFilter(root, { it.viewIdResourceName == id }, result)
+            root.recycle()
         }
+        return result
     }
 
-    private fun traverseNode(node: AccessibilityNodeInfo, result: MutableList<AccessibilityNodeInfo>) {
-        result.add(node)
+    fun findNodeByContentDescription(desc: String): List<AccessibilityNodeInfo> {
+        val result = mutableListOf<AccessibilityNodeInfo>()
+        getTargetRoots().forEach { root ->
+            traverseAndFilter(root, { it.contentDescription?.toString() == desc }, result)
+            root.recycle()
+        }
+        return result
+    }
+
+    /** 遍歷並過濾節點，會正確獲取副本供外部使用 */
+    private fun traverseAndFilter(
+        node: AccessibilityNodeInfo,
+        filter: (AccessibilityNodeInfo) -> Boolean,
+        result: MutableList<AccessibilityNodeInfo>
+    ) {
+        if (filter(node)) {
+            result.add(AccessibilityNodeInfo.obtain(node))
+        }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            traverseNode(
-                child,
-                result
-            )
+            traverseAndFilter(child, filter, result)
+            child.recycle()
         }
     }
 }

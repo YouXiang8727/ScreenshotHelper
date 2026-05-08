@@ -3,6 +3,7 @@ package com.youxiang8727.screenshothelper.service
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
@@ -13,6 +14,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -29,10 +31,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -71,9 +78,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.max
 import kotlin.math.min
+
+enum class SliderSearchType {
+    TEXT, ID, CONTENT_DESCRIPTION
+}
 
 class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStateRegistryOwner {
 
@@ -81,6 +93,7 @@ class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStat
         private const val TAG = "FloatingWindowService"
         private const val CHANNEL_ID = "floating_window_channel"
         private const val NOTIFICATION_ID = 1002
+        private const val PREFS_NAME = "slider_prefs"
 
         private var savedX = 100
         private var savedY = 200
@@ -145,7 +158,7 @@ class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStat
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             windowType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -153,25 +166,82 @@ class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStat
             y = savedY
         }
 
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
         floatingComposeView = createComposeView {
-            FloatingBubbleContent(
-                onDrag = { dx, dy ->
-                    floatingParams.x += dx
-                    floatingParams.y += dy
-                    windowManager?.updateViewLayout(floatingComposeView, floatingParams)
-                    savedX = floatingParams.x
-                    savedY = floatingParams.y
-                },
-                onScreenshotClick = {
-                    ScreenshotService.takeScreenshot()
-                    NodeAccessibilityService.instance?.performNodeDump()
-                },
-                onOcrClick = { showSelectionOverlay() },
-                onSliderClick = { handleCalculateSlider() }
-            )
+            var showSliderConfig by remember { mutableStateOf(false) }
+            var isRecognizing by remember { mutableStateOf(false) }
+
+            // 從 SharedPreferences 加載初始值
+            var bigKey by remember { mutableStateOf(prefs.getString("bigKey", "puzzle_backimg") ?: "puzzle_backimg") }
+            var bigType by remember { mutableStateOf(SliderSearchType.valueOf(prefs.getString("bigType", SliderSearchType.ID.name) ?: SliderSearchType.ID.name)) }
+            var smallKey by remember { mutableStateOf(prefs.getString("smallKey", "puzzle_slot") ?: "puzzle_slot") }
+            var smallType by remember { mutableStateOf(SliderSearchType.valueOf(prefs.getString("smallType", SliderSearchType.ID.name) ?: SliderSearchType.ID.name)) }
+
+            // 確保每次變更都寫入 Prefs
+            val updateBigKey: (String) -> Unit = { it -> bigKey = it; prefs.edit().putString("bigKey", it).apply() }
+            val updateBigType: (SliderSearchType) -> Unit = { it -> bigType = it; prefs.edit().putString("bigType", it.name).apply() }
+            val updateSmallKey: (String) -> Unit = { it -> smallKey = it; prefs.edit().putString("smallKey", it).apply() }
+            val updateSmallType: (SliderSearchType) -> Unit = { it -> smallType = it; prefs.edit().putString("smallType", it.name).apply() }
+
+            val onDrag: (Int, Int) -> Unit = { dx, dy ->
+                floatingParams.x += dx
+                floatingParams.y += dy
+                windowManager?.updateViewLayout(floatingComposeView, floatingParams)
+                savedX = floatingParams.x
+                savedY = floatingParams.y
+            }
+
+            if (isRecognizing) {
+                RecognizingContent(onDrag = onDrag)
+            } else if (!showSliderConfig) {
+                FloatingBubbleContent(
+                    onDrag = onDrag,
+                    onScreenshotClick = {
+                        ScreenshotService.takeScreenshot()
+                        NodeAccessibilityService.instance?.performNodeDump()
+                    },
+                    onOcrClick = { showSelectionOverlay() },
+                    onSliderClick = { 
+                        showSliderConfig = true
+                        updateFloatingWindowFocus(true)
+                    }
+                )
+            } else {
+                SliderConfigContent(
+                    bigKey = bigKey,
+                    onBigKeyChange = updateBigKey,
+                    bigType = bigType,
+                    onBigTypeChange = updateBigType,
+                    smallKey = smallKey,
+                    onSmallKeyChange = updateSmallKey,
+                    smallType = smallType,
+                    onSmallTypeChange = updateSmallType,
+                    onDrag = onDrag,
+                    onBack = { 
+                        showSliderConfig = false
+                        updateFloatingWindowFocus(false)
+                    },
+                    onRecognize = {
+                        handleCalculateSlider(bigKey, bigType, smallKey, smallType) { recognizing ->
+                            isRecognizing = recognizing
+                            updateFloatingWindowFocus(!recognizing)
+                        }
+                    }
+                )
+            }
         }
 
         windowManager?.addView(floatingComposeView, floatingParams)
+    }
+
+    private fun updateFloatingWindowFocus(focusable: Boolean) {
+        if (focusable) {
+            floatingParams.flags = floatingParams.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        } else {
+            floatingParams.flags = floatingParams.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        }
+        windowManager?.updateViewLayout(floatingComposeView, floatingParams)
     }
 
     private fun showSelectionOverlay() {
@@ -249,24 +319,43 @@ class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStat
         }
     }
 
-    private fun handleCalculateSlider() {
+    private fun handleCalculateSlider(
+        bigKey: String, 
+        bigType: SliderSearchType, 
+        smallKey: String, 
+        smallType: SliderSearchType,
+        onStateChange: (Boolean) -> Unit
+    ) {
         val accessibilityService = NodeAccessibilityService.instance ?: return
-        val targetNode = accessibilityService.findNodeById("puzzle_backimg").getOrNull(0)
-        val puzzle = accessibilityService.findNodeById("puzzle_slot").getOrNull(0)
-        val slider = accessibilityService.findNodeByText("请拖动滑块完成拼图").getOrNull(0)?.parent?.getChild(2)
+        
+        fun findNodes(key: String, type: SliderSearchType): List<AccessibilityNodeInfo> {
+            Log.d(TAG, "findNodes($key, $type)")
+            return when (type) {
+                SliderSearchType.TEXT -> accessibilityService.findNodeByText(key)
+                SliderSearchType.ID -> accessibilityService.findNodeById(key)
+                SliderSearchType.CONTENT_DESCRIPTION -> accessibilityService.findNodeByContentDescription(key)
+            }
+        }
 
-        if (targetNode != null && puzzle != null && slider != null) {
-            val sliderRect = Rect().apply { slider.getBoundsInScreen(this) }
-            OpenCvHelper.identifySliderOffset(this@FloatingWindowService, targetNode, puzzle) { offset ->
-                serviceScope.launch(Dispatchers.Main) {
-                    Toast.makeText(this@FloatingWindowService, "偏移量: $offset", Toast.LENGTH_SHORT).show()
-                    if (offset > 0) {
-//                        accessibilityService.dispatchSwipe(
-//                            sliderRect.centerX(), sliderRect.centerY(),
-//                            sliderRect.centerX() + offset, sliderRect.centerY(), 1000
-//                        )
+        val targetNode = findNodes(bigKey, bigType).getOrNull(0)
+        val puzzle = findNodes(smallKey, smallType).getOrNull(0)
+
+        if (targetNode != null && puzzle != null) {
+            onStateChange(true) // 開始辨識，切換 UI 並縮小
+            serviceScope.launch(Dispatchers.Main) {
+                // 給 Compose 渲染時間並確保懸浮窗已縮小且鍵盤已收合，再執行截圖
+                delay(400)
+                OpenCvHelper.identifySliderOffset(this@FloatingWindowService, targetNode, puzzle) { offset ->
+                    serviceScope.launch(Dispatchers.Main) {
+                        onStateChange(false) // 恢復原本畫面
+                        Toast.makeText(this@FloatingWindowService, "偏移量: $offset", Toast.LENGTH_SHORT).show()
                     }
                 }
+            }
+        } else {
+            serviceScope.launch(Dispatchers.Main) {
+                val msg = "找不到節點: 大圖=${targetNode != null}, 小圖=${puzzle != null}"
+                Toast.makeText(this@FloatingWindowService, msg, Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -298,6 +387,137 @@ class FloatingWindowService : LifecycleService(), ViewModelStoreOwner, SavedStat
             .setContentText("服務運行中")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .build()
+}
+
+@Composable
+fun RecognizingContent(onDrag: (Int, Int) -> Unit) {
+    Box(
+        modifier = Modifier
+            .width(120.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xCC333333))
+            .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(16.dp))
+            .padding(12.dp)
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    onDrag(dragAmount.x.toInt(), dragAmount.y.toInt())
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Text("辨識中...", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+fun SliderConfigContent(
+    bigKey: String,
+    onBigKeyChange: (String) -> Unit,
+    bigType: SliderSearchType,
+    onBigTypeChange: (SliderSearchType) -> Unit,
+    smallKey: String,
+    onSmallKeyChange: (String) -> Unit,
+    smallType: SliderSearchType,
+    onSmallTypeChange: (SliderSearchType) -> Unit,
+    onDrag: (Int, Int) -> Unit,
+    onBack: () -> Unit,
+    onRecognize: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .width(220.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xCC333333))
+            .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(16.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .pointerInput(Unit) {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        onDrag(dragAmount.x.toInt(), dragAmount.y.toInt())
+                    }
+                }
+        ) {
+            Text(
+                "⬅",
+                color = Color.White,
+                fontSize = 20.sp,
+                modifier = Modifier
+                    .clickable { onBack() }
+                    .padding(4.dp)
+            )
+            Text(
+                "滑動驗證配置",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("大圖配置:", color = Color.Cyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            OutlinedTextField(
+                value = bigKey,
+                onValueChange = onBigKeyChange,
+                label = { Text("大圖關鍵字", fontSize = 10.sp, color = Color.LightGray) },
+                modifier = Modifier.fillMaxWidth(),
+                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp)
+            )
+            SearchTypeSelector(selectedType = bigType, onTypeSelected = onBigTypeChange)
+
+            Text("小圖配置:", color = Color.Cyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            OutlinedTextField(
+                value = smallKey,
+                onValueChange = onSmallKeyChange,
+                label = { Text("小圖關鍵字", fontSize = 10.sp, color = Color.LightGray) },
+                modifier = Modifier.fillMaxWidth(),
+                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp)
+            )
+            SearchTypeSelector(selectedType = smallType, onTypeSelected = onSmallTypeChange)
+
+            ActionButton("辨識", Color.Yellow) {
+                onRecognize()
+            }
+        }
+    }
+}
+
+@Composable
+fun SearchTypeSelector(selectedType: SliderSearchType, onTypeSelected: (SliderSearchType) -> Unit) {
+    Column {
+        SliderSearchType.values().forEach { type ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onTypeSelected(type) }
+                    .padding(vertical = 2.dp)
+            ) {
+                RadioButton(
+                    selected = selectedType == type,
+                    onClick = { onTypeSelected(type) },
+                    colors = RadioButtonDefaults.colors(
+                        selectedColor = Color.Yellow,
+                        unselectedColor = Color.Gray
+                    ),
+                    modifier = Modifier.size(32.dp)
+                )
+                Text(type.name, color = Color.White, fontSize = 10.sp)
+            }
+        }
+    }
 }
 
 @Composable
