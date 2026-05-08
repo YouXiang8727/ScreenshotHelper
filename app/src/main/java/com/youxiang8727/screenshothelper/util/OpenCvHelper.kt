@@ -58,13 +58,98 @@ object OpenCvHelper {
         }
     }
 
+    fun autoFindSlideGap(
+        context: Context,
+        left: Int, 
+        top: Int, 
+        right: Int, 
+        bottom: Int, 
+        callback: (Int) -> Unit
+    ) {
+        ScreenshotService.captureCurrentFrame { fullBitmap ->
+            if (fullBitmap == null) {
+                Log.e(TAG, "Failed to capture screen")
+                callback(-1)
+                return@captureCurrentFrame
+            }
+
+            val rect = android.graphics.Rect(left, top, right, bottom)
+            val bitmap = cropBitmap(fullBitmap, rect)
+            fullBitmap.recycle()
+
+            if (bitmap == null) {
+                callback(-1)
+                return@captureCurrentFrame
+            }
+
+            val subDir = "autoFindSlideGap"
+            val fileName = "${System.currentTimeMillis()}.png"
+            val mat = Mat()
+            Utils.bitmapToMat(bitmap, mat)
+            
+            // 1. 儲存原始剪裁圖
+            saveDebugImage(context, mat, subDir, "1_original_$fileName")
+
+            // 灰階
+            val gray = Mat()
+            Imgproc.cvtColor(mat, gray, Imgproc.COLOR_RGBA2GRAY)
+            // 2. 儲存灰階圖
+            saveDebugImage(context, gray, subDir, "2_gray_$fileName")
+
+            // 高斯模糊降噪
+            Imgproc.GaussianBlur(gray, gray, Size(5.0, 5.0), 0.0)
+            // 3. 儲存模糊後的圖
+            saveDebugImage(context, gray, subDir, "3_blurred_$fileName")
+
+            // 邊緣檢測
+            val edges = Mat()
+            Imgproc.Canny(gray, edges, 50.0, 150.0)
+            // 4. 儲存邊緣檢測圖
+            saveDebugImage(context, edges, subDir, "4_edges_$fileName")
+
+            // 水平投影：每列邊緣像素總和
+            val colSums = IntArray(edges.cols()) { x ->
+                var sum = 0
+                for (y in 0 until edges.rows()) {
+                    if (edges.get(y, x)[0] > 0) sum++
+                }
+                sum
+            }
+
+            // 找灰階差異最大的列，通常是缺口中心
+            var maxDiff = 0
+            var gapX = 0
+            for (x in 1 until colSums.size) {
+                val diff = colSums[x] - colSums[x - 1]
+                if (diff > maxDiff) {
+                    maxDiff = diff
+                    gapX = x
+                }
+            }
+
+            // 5. 繪製紅色結果框線並儲存
+            // 假設拼圖缺口寬度約 50 像素
+            val rectWidth = 50
+            Imgproc.rectangle(
+                mat,
+                Rect(gapX, 0, rectWidth.coerceAtMost(mat.cols() - gapX), mat.rows()),
+                Scalar(255.0, 0.0, 0.0, 255.0),
+                2
+            )
+            saveDebugImage(context, mat, subDir, "5_result_$fileName")
+
+            // 釋放資源
+            mat.release()
+            gray.release()
+            edges.release()
+            bitmap.recycle()
+            
+            callback(gapX)
+        }
+    }
+
     /**
      * 辨識滑動距離並儲存調試圖片 (直接傳入圖片)
-     * @param bgBitmap 背景圖
-     * @param sliderBitmap 滑塊圖
-     * @param sliderX 滑塊在背景圖中的起始 X 座標
-     * @param sliderY 滑塊在背景圖中的起始 Y 座標
-     * @param fileName 儲存的檔案名稱
      */
     fun identifySliderOffsetByBitmaps(
         context: Context,
@@ -74,7 +159,6 @@ object OpenCvHelper {
         sliderY: Int,
         fileName: String
     ): Int {
-        // 儲存於 identifySliderOffsetByBitmaps 子資料夾，檔名由外部指定
         return calculateAndDebug(
             context, 
             bgBitmap, 
@@ -103,8 +187,8 @@ object OpenCvHelper {
         // 1. 預處理
         val bgGray = Mat()
         val sliderGray = Mat()
-        Imgproc.cvtColor(bgSrc, bgGray, Imgproc.COLOR_BGR2GRAY)
-        Imgproc.cvtColor(sliderSrc, sliderGray, Imgproc.COLOR_BGR2GRAY)
+        Imgproc.cvtColor(bgSrc, bgGray, Imgproc.COLOR_RGBA2GRAY)
+        Imgproc.cvtColor(sliderSrc, sliderGray, Imgproc.COLOR_RGBA2GRAY)
 
         val bgEdges = Mat()
         val sliderEdges = Mat()
@@ -134,20 +218,19 @@ object OpenCvHelper {
         Imgproc.rectangle(
             bgSrc, 
             Rect(sliderX, sliderY, sliderSrc.cols(), sliderSrc.rows()), 
-            Scalar(0.0, 0.0, 255.0), 
+            Scalar(0.0, 0.0, 255.0, 255.0), 
             2
         )
         Imgproc.rectangle(
             bgSrc, 
             Rect(bestMatchX, bestMatchY, sliderSrc.cols(), sliderSrc.rows()), 
-            Scalar(0.0, 0.0, 0.0), 
+            Scalar(0.0, 0.0, 0.0, 255.0), 
             2
         )
 
         // 4. 儲存圖片
         saveDebugImage(context, bgSrc, subDir, fileName)
 
-        // 計算位移：(缺口最左邊) - (拼圖最左邊)
         val finalDistance = bestMatchX - sliderX
         Log.d(TAG, "Result -> MatchX: $bestMatchX, SliderX: $sliderX, Dist: $finalDistance, Conf: ${mmr.maxVal}")
 
