@@ -11,8 +11,6 @@ import org.opencv.imgproc.Imgproc
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
 
 object OpenCvHelper {
     private const val TAG = "OpenCvHelper"
@@ -65,10 +63,10 @@ object OpenCvHelper {
      */
     fun autoFindSlideGap(
         context: Context,
-        left: Int, 
-        top: Int, 
-        right: Int, 
-        bottom: Int, 
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
         callback: (Int) -> Unit
     ) {
         ScreenshotService.captureCurrentFrame { fullBitmap ->
@@ -78,101 +76,122 @@ object OpenCvHelper {
                 return@captureCurrentFrame
             }
 
-            val rect = android.graphics.Rect(left, top, right, bottom)
-            val bitmap = cropBitmap(fullBitmap, rect)
-            fullBitmap.recycle()
-
+            val bitmap = cropBitmap(fullBitmap, android.graphics.Rect(left, top, right, bottom))
             if (bitmap == null) {
                 callback(-1)
                 return@captureCurrentFrame
             }
+            val dirName = "${System.currentTimeMillis()}"
 
-            val subDir = "autoFindSlideGap"
-            val fileName = "${System.currentTimeMillis()}.png"
             val mat = Mat()
             Utils.bitmapToMat(bitmap, mat)
-            
-            // 1. 儲存原始剪裁圖
-            saveDebugImage(context, mat, subDir, "1_original_$fileName")
 
-            // 2. 灰階
             val gray = Mat()
             Imgproc.cvtColor(mat, gray, Imgproc.COLOR_RGBA2GRAY)
-            saveDebugImage(context, gray, subDir, "2_gray_$fileName")
+            saveDebugImage(context, gray, dirName, "灰階.jpg")
 
-            // 3. 高斯模糊降噪
-            val blurred = Mat()
-            Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
-            saveDebugImage(context, blurred, subDir, "3_blurred_$fileName")
-
-            // 4. 邊緣檢測
-            val edges = Mat()
-            Imgproc.Canny(blurred, edges, 50.0, 150.0)
-            saveDebugImage(context, edges, subDir, "4_edges_$fileName")
-
-            // 水平投影：尋找最強邊緣作為拼圖起始點
-            val colSums = IntArray(edges.cols()) { x ->
-                var sum = 0
-                for (y in 0 until edges.rows()) {
-                    if (edges.get(y, x)[0] > 0) sum++
-                }
-                sum
-            }
-
-            var maxDiff = -1
-            var pos1 = -1
-            for (x in 1 until colSums.size) {
-                val diff = colSums[x] - colSums[x - 1]
-                if (diff > maxDiff) {
-                    maxDiff = diff
-                    pos1 = x
-                }
-            }
-
-            if (pos1 == -1) {
-                mat.release(); gray.release(); blurred.release(); edges.release(); bitmap.recycle()
-                callback(-1)
-                return@captureCurrentFrame
-            }
-
-            // --- 核心改進：裁切拼圖塊作為模板進行全局匹配 ---
-            // 裁切寬度設定為 60 像素
-            val sliderWidth = 60
-            val sliderRect = android.graphics.Rect(
-                pos1, 
-                0, 
-                (pos1 + sliderWidth).coerceAtMost(bitmap.width), 
-                bitmap.height
+            val binary = Mat()
+            Imgproc.adaptiveThreshold(
+                gray, binary, 255.0,
+                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
+                Imgproc.THRESH_BINARY_INV, 11, 2.0
             )
-            val sliderBitmap = cropBitmap(bitmap, sliderRect)
+            saveDebugImage(context, binary, dirName, "自適應二值化.jpg")
 
-            if (sliderBitmap == null) {
-                mat.release(); gray.release(); blurred.release(); edges.release(); bitmap.recycle()
-                callback(-1)
-                return@captureCurrentFrame
+            // 3. 垂直特徵投影
+            val leftQuart = binary.cols() / 4
+            val verticalProjection = IntArray(leftQuart)
+            for (x in 0 until leftQuart) {
+                var count = 0
+                // 掃描中段區域
+                for (y in (binary.rows() / 4)..(3 * binary.rows() / 4)) {
+                    if (binary.get(y, x)[0] > 0) count++
+                }
+                verticalProjection[x] = count
             }
 
-            // 調用模板匹配演算法：它會畫上紅色標註並儲存第 5 步的結果圖
-            val distance = calculateAndDebug(
-                context, 
-                bitmap, 
-                sliderBitmap, 
-                pos1, 
-                0, 
-                subDir = subDir, 
-                fileName = "5_result_$fileName"
-            )
+            // 4. 尋找最佳匹配 X 位置 (滑動視窗評分)
+            var bestX = -1
+            var maxScore = -1
+            val targetWidth = 45
 
-            // 釋放資源
-            mat.release()
-            gray.release()
-            blurred.release()
-            edges.release()
-            sliderBitmap.recycle()
-            bitmap.recycle()
-            
-            Log.d(TAG, "autoFindSlideGap -> pos1(piece): $pos1, distance: $distance")
-            callback(distance)
+            for (x in 5 until leftQuart - targetWidth - 5) {
+                val leftEdgeDensity = (verticalProjection[x - 1] + verticalProjection[x] + verticalProjection[x + 1]) / 3
+                val rightEdgeDensity = (verticalProjection[x + targetWidth - 1] + verticalProjection[x + targetWidth] + verticalProjection[x + targetWidth + 1]) / 3
+
+                var innerContent = 0
+                for (i in x + 5 until x + targetWidth - 5) {
+                    innerContent += verticalProjection[i]
+                }
+
+                val score = (leftEdgeDensity + rightEdgeDensity) * 2 + (innerContent / (targetWidth - 10))
+
+                if (score > maxScore) {
+                    maxScore = score
+                    bestX = x
+                }
+            }
+
+            if (bestX != -1) {
+                // --- 核心改進：從內圈邊緣向左回溯到外圈邊緣 ---
+                var outerX = bestX
+                // 往左尋找，如果左邊的密度依然很高，代表邊緣還沒結束
+                while (outerX > 2 && verticalProjection[outerX - 1] > verticalProjection[bestX] * 0.6) {
+                    outerX--
+                    // 防止無限回溯
+                    if (bestX - outerX > 8) break
+                }
+
+                // 5. 自動尋找最佳 Y 軸位置
+                val horizontalProjection = IntArray(binary.rows())
+                for (y in 0 until binary.rows()) {
+                    var count = 0
+                    // 掃描從 outerX 開始的區間
+                    for (x in outerX until (outerX + targetWidth + 5).coerceAtMost(binary.cols())) {
+                        if (binary.get(y, x)[0] > 0) count++
+                    }
+                    horizontalProjection[y] = count
+                }
+
+                var bestY = (binary.rows() / 2) - 40
+                var maxYSum = -1
+                val scanHeight = 80
+                for (y in 5 until binary.rows() - scanHeight - 5) {
+                    var currentSum = 0
+                    for (i in 0 until scanHeight) currentSum += horizontalProjection[y + i]
+                    if (currentSum > maxYSum) {
+                        maxYSum = currentSum
+                        bestY = y
+                    }
+                }
+
+                // 最終寬度補償：因為起點往左移了，寬度要加回來，並多包 2 像素確保包住外圈
+                val finalWidth = targetWidth + (bestX - outerX) + 2
+                val puzzleRect = Rect(outerX, bestY, finalWidth, scanHeight)
+
+                // 繪製與儲存
+                Imgproc.rectangle(mat, puzzleRect, Scalar(255.0, 0.0, 0.0), 2)
+                saveDebugImage(context, mat, dirName, "抓取拼圖位置.jpg")
+
+                val sliderBmp = Bitmap.createBitmap(bitmap, puzzleRect.x, puzzleRect.y, puzzleRect.width, puzzleRect.height)
+                val distance = calculateAndDebug(context, bitmap, sliderBmp, puzzleRect.x, puzzleRect.y, dirName, "result.png")
+
+                sliderBmp.recycle()
+                callback(distance)
+            } else {
+                callback(-1)
+            }
+
+            releaseAll(mat, gray, binary)
+        }
+    }
+
+    private fun releaseAll(vararg objs: Any?) {
+        for (obj in objs) {
+            when (obj) {
+                is Mat -> obj.release()
+                is Bitmap -> if (!obj.isRecycled) obj.recycle()
+            }
         }
     }
 
